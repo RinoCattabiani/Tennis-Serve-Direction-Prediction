@@ -55,3 +55,163 @@ parse_serve_direction <- function(serve_code) {
     )
 }
 ```
+
+# Extract numerous features for serve direction prediction
+
+These features will be the 'predictors' that our models will use to predict serve direction. 
+```{r}
+extract_features_enhanced <- function(points_data, player_name, min_matches = 60) {
+    points_data <- points_data %>%
+        mutate(
+            serve_dir = sapply(`1st`, parse_serve_direction),
+            player1 = sapply(strsplit(match_id, "-"), function(x) x[length(x) - 1]),
+            player2 = sapply(strsplit(match_id, "-"), function(x) x[length(x)]),
+            serve_side = sapply(Pts, function(score) {
+                if (is.na(score) || score == "") {
+                    return(NA)
+                }
+                if (grepl("AD", score)) {
+                    return("A")
+                }
+                if (score == "0-0") {
+                    return("D")
+                }
+
+                parts <- strsplit(score, "-")[[1]]
+                if (length(parts) != 2) {
+                    return(NA)
+                }
+
+                p1 <- case_when(parts[1] == "0" ~ 0, parts[1] == "15" ~ 1, parts[1] == "30" ~ 2, parts[1] == "40" ~ 3, TRUE ~ NA_real_)
+                p2 <- case_when(parts[2] == "0" ~ 0, parts[2] == "15" ~ 1, parts[2] == "30" ~ 2, parts[2] == "40" ~ 3, TRUE ~ NA_real_)
+
+                if (is.na(p1) || is.na(p2)) {
+                    return(NA)
+                }
+                total_points <- p1 + p2
+                return(ifelse(total_points %% 2 == 0, "D", "A"))
+            })
+        )
+
+    player_serves <- points_data %>%
+        filter(!is.na(`1st`), !grepl("x", `1st`), !is.na(serve_dir), !is.na(serve_side)) %>%
+        mutate(
+            is_target_server = case_when(
+                Svr == 1 ~ grepl(player_name, player1, ignore.case = TRUE),
+                Svr == 2 ~ grepl(player_name, player2, ignore.case = TRUE),
+                TRUE ~ FALSE
+            ),
+            server_won = ifelse(Svr == PtWinner, 1, 0),
+            is_break_point = grepl("30-40|0-40|15-40", Pts) & Svr == 2,
+            is_game_point = grepl("40-0|40-15|40-30", Pts) & Svr == 1,
+            is_deuce = grepl("40-40|AD", Pts),
+            is_tiebreak = (Gm1 == 6 & Gm2 == 6),
+            game_diff = Gm1 - Gm2,
+            set_diff = Set1 - Set2
+        ) %>%
+        filter(is_target_server)
+
+    n_matches <- length(unique(player_serves$match_id))
+    if (n_matches < min_matches) {
+        cat(sprintf("Player %s only has %d matches (need %d)\n", player_name, n_matches, min_matches))
+        return(NULL)
+    }
+
+    cat(sprintf("Player %s: %d matches, %d first serves\n", player_name, n_matches, nrow(player_serves)))
+
+    features <- player_serves %>%
+        arrange(match_id, Pt) %>%
+        mutate(
+            wide_count = 0, body_count = 0, t_count = 0,
+            wide_won = 0, body_won = 0, t_won = 0,
+            wide_pct = 0, body_pct = 0, t_pct = 0,
+            server_run_index = 0, prev_point_won = 0, anxiety = 0,
+            serve_number_in_match = 0, match_stage = 0, points_in_current_game = 0,
+            consecutive_wins = 0, consecutive_losses = 0, consecutive_same_direction = 0,
+            serve_entropy = 0, momentum_score = 0, point_diff_in_game = 0
+        )
+
+    for (i in 1:nrow(features)) {
+        current_match <- features$match_id[i]
+        prev_points <- features %>% filter(match_id == current_match, row_number() < i)
+
+        if (nrow(prev_points) > 0) {
+            # Original features
+            features$wide_count[i] <- sum(prev_points$serve_dir == "W", na.rm = TRUE)
+            features$body_count[i] <- sum(prev_points$serve_dir == "B", na.rm = TRUE)
+            features$t_count[i] <- sum(prev_points$serve_dir == "T", na.rm = TRUE)
+            features$wide_won[i] <- sum(prev_points$serve_dir == "W" & prev_points$server_won == 1, na.rm = TRUE)
+            features$body_won[i] <- sum(prev_points$serve_dir == "B" & prev_points$server_won == 1, na.rm = TRUE)
+            features$t_won[i] <- sum(prev_points$serve_dir == "T" & prev_points$server_won == 1, na.rm = TRUE)
+            features$wide_pct[i] <- ifelse(features$wide_count[i] > 0, features$wide_won[i] / features$wide_count[i], 0)
+            features$body_pct[i] <- ifelse(features$body_count[i] > 0, features$body_won[i] / features$body_count[i], 0)
+            features$t_pct[i] <- ifelse(features$t_count[i] > 0, features$t_won[i] / features$t_count[i], 0)
+            features$prev_point_won[i] <- tail(prev_points$server_won, 1)
+            features$server_run_index[i] <- nrow(prev_points)
+            features$anxiety[i] <- calculate_anxiety(features$Set1[i], features$Set2[i], features$Gm1[i], features$Gm2[i], 0, 0)
+
+            # Temporal features
+            features$serve_number_in_match[i] <- nrow(prev_points) + 1
+            features$match_stage[i] <- case_when(
+                features$serve_number_in_match[i] <= 30 ~ 0,
+                features$serve_number_in_match[i] <= 70 ~ 1,
+                TRUE ~ 2
+            )
+
+            current_score <- features$Pts[i]
+            if (!is.na(current_score) && current_score != "") {
+                parts <- strsplit(current_score, "-")[[1]]
+                if (length(parts) == 2) {
+                    p1_points <- case_when(parts[1] == "0" ~ 0, parts[1] == "15" ~ 1, parts[1] == "30" ~ 2, parts[1] == "40" ~ 3, TRUE ~ 0)
+                    p2_points <- case_when(parts[2] == "0" ~ 0, parts[2] == "15" ~ 1, parts[2] == "30" ~ 2, parts[2] == "40" ~ 3, TRUE ~ 0)
+                    features$points_in_current_game[i] <- p1_points + p2_points
+                    features$point_diff_in_game[i] <- p1_points - p2_points
+                }
+            }
+
+            # Psychological features
+            consecutive_count <- 1
+            last_result <- tail(prev_points$server_won, 1)
+            if (nrow(prev_points) > 1) {
+                for (j in (nrow(prev_points) - 1):1) {
+                    if (prev_points$server_won[j] == last_result) {
+                        consecutive_count <- consecutive_count + 1
+                    } else {
+                        break
+                    }
+                }
+            }
+            features$consecutive_wins[i] <- ifelse(last_result == 1, consecutive_count, 0)
+            features$consecutive_losses[i] <- ifelse(last_result == 0, consecutive_count, 0)
+
+            # Consecutive same direction
+            same_dir_count <- 1
+            last_dir <- tail(prev_points$serve_dir, 1)
+            if (nrow(prev_points) > 1) {
+                for (j in (nrow(prev_points) - 1):1) {
+                    if (!is.na(prev_points$serve_dir[j]) && prev_points$serve_dir[j] == last_dir) {
+                        same_dir_count <- same_dir_count + 1
+                    } else {
+                        break
+                    }
+                }
+            }
+            features$consecutive_same_direction[i] <- same_dir_count
+
+            # Serve entropy
+            if (nrow(prev_points) >= 10) {
+                last_10_serves <- tail(prev_points$serve_dir, 10)
+                last_10_serves <- last_10_serves[!is.na(last_10_serves)]
+                if (length(last_10_serves) > 0 && length(unique(last_10_serves)) > 1) {
+                    serve_props <- table(last_10_serves) / length(last_10_serves)
+                    features$serve_entropy[i] <- -sum(serve_props * log2(serve_props))
+                }
+            }
+
+            features$momentum_score[i] <- (features$set_diff[i] * 10) + (features$game_diff[i] * 3) + features$point_diff_in_game[i]
+        }
+    }
+
+    return(features)
+}
+```
