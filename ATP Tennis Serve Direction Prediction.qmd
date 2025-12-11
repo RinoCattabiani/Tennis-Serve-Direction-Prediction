@@ -37,3 +37,21 @@ points_women <- points_women %>% left_join(surface_lookup_women, by = "match_id"
 
 cat(sprintf("Loaded %d men's points and %d women's points\n", nrow(points_men), nrow(points_women)))
 ```
+
+# Add serve direction parser 
+
+I want to know when the serve is hit in the direction of 'T' (Down the center service line), 'B' (Body), or 'W' (Wide).
+```{r}
+parse_serve_direction <- function(serve_code) {
+    if (is.na(serve_code) || serve_code == "") {
+        return(NA)
+    }
+    first_char <- substr(serve_code, 1, 1)
+    case_when(
+        first_char == "4" ~ "W",
+        first_char == "5" ~ "B",
+        first_char == "6" ~ "T",
+        TRUE ~ NA_character_
+    )
+}
+```
