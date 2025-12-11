@@ -148,7 +148,6 @@ extract_features_enhanced <- function(points_data, player_name, min_matches = 60
             features$t_pct[i] <- ifelse(features$t_count[i] > 0, features$t_won[i] / features$t_count[i], 0)
             features$prev_point_won[i] <- tail(prev_points$server_won, 1)
             features$server_run_index[i] <- nrow(prev_points)
-            features$anxiety[i] <- calculate_anxiety(features$Set1[i], features$Set2[i], features$Gm1[i], features$Gm2[i], 0, 0)
 
             # Temporal features
             features$serve_number_in_match[i] <- nrow(prev_points) + 1
@@ -343,7 +342,7 @@ run_analysis <- function(points_data, top_n_players = 10, min_matches = 60) {
             row <- c(result$player, unlist(result$accuracies))
             df <- rbind(df, row)
         }
-        colnames(df) <- c("Player", "LR", "RF", "DT", "SVM", "NN", "MEAN")
+        colnames(df) <- c("Player", "LR", "RF", "DT", "NN", "MEAN")
         df[, 2:7] <- lapply(df[, 2:7], function(x) round(as.numeric(x), 2))
         return(df)
     }
