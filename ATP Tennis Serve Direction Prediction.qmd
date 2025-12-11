@@ -298,3 +298,85 @@ train_and_evaluate <- function(player_data, player_name, court_side = "deuce") {
     return(list(player = player_name, side = court_side, accuracies = results, n_points = nrow(model_data)))
 }
 ```
+
+# Run complete analysis
+
+Run the entire analysis
+```{r}
+run_analysis <- function(points_data, top_n_players = 10, min_matches = 60) {
+    player_matches <- points_data %>%
+        group_by(match_id) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(
+            player1 = sapply(strsplit(match_id, "-"), function(x) x[length(x) - 1]),
+            player2 = sapply(strsplit(match_id, "-"), function(x) x[length(x)])
+        ) %>%
+        select(player1, player2) %>%
+        pivot_longer(cols = everything(), values_to = "player") %>%
+        group_by(player) %>%
+        summarise(n_matches = n()) %>%
+        filter(n_matches >= min_matches) %>%
+        arrange(desc(n_matches))
+
+    cat(sprintf("Found %d players with %d+ matches\n", nrow(player_matches), min_matches))
+
+    selected_players <- head(player_matches$player, top_n_players)
+    deuce_results <- list()
+    ad_results <- list()
+
+    for (player in selected_players) {
+        cat(sprintf("\n=== Processing %s ===\n", player))
+        player_data <- extract_features_enhanced(points_data, player, min_matches)
+
+        if (!is.null(player_data)) {
+            deuce_res <- train_and_evaluate(player_data, player, "deuce")
+            ad_res <- train_and_evaluate(player_data, player, "ad")
+            if (!is.null(deuce_res)) deuce_results[[player]] <- deuce_res
+            if (!is.null(ad_res)) ad_results[[player]] <- ad_res
+        }
+    }
+
+    create_results_table <- function(results_list) {
+        df <- data.frame()
+        for (result in results_list) {
+            row <- c(result$player, unlist(result$accuracies))
+            df <- rbind(df, row)
+        }
+        colnames(df) <- c("Player", "LR", "RF", "DT", "SVM", "NN", "MEAN")
+        df[, 2:7] <- lapply(df[, 2:7], function(x) round(as.numeric(x), 2))
+        return(df)
+    }
+
+    deuce_table <- create_results_table(deuce_results)
+    ad_table <- create_results_table(ad_results)
+
+    cat("\n=== DEUCE SIDE RESULTS ===\n")
+    print(deuce_table)
+    cat("\n=== AD SIDE RESULTS ===\n")
+    print(ad_table)
+    cat(sprintf(
+        "\nDeuce mean: %.2f | Ad mean: %.2f\n",
+        mean(as.numeric(deuce_table$MEAN)), mean(as.numeric(ad_table$MEAN))
+    ))
+
+    return(list(
+        deuce_results = deuce_results, ad_results = ad_results,
+        deuce_table = deuce_table, ad_table = ad_table
+    ))
+}
+
+cat("\n========== MEN'S ANALYSIS ==========\n")
+men_results <- run_analysis(points_men, top_n_players = 10, min_matches = 60)
+
+cat("\n========== WOMEN'S ANALYSIS ==========\n")
+women_results <- run_analysis(points_women, top_n_players = 10, min_matches = 60)
+
+# Save results
+write.csv(men_results$deuce_table, "men_deuce_results.csv", row.names = FALSE)
+write.csv(men_results$ad_table, "men_ad_results.csv", row.names = FALSE)
+write.csv(women_results$deuce_table, "women_deuce_results.csv", row.names = FALSE)
+write.csv(women_results$ad_table, "women_ad_results.csv", row.names = FALSE)
+
+cat("\n========== COMPLETE! ==========\n")
+```
