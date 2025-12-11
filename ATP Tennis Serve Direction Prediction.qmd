@@ -3,9 +3,9 @@ title: "ATP Tennis Serve Direction Prediction"
 format: html
 ---
 
-# Importing Dependencies
+# Import Dependencies
 
-This is my analysis.
+Libraries that will come in handy in the future.
 ```{r}
 library(tidyverse)
 library(caret)
@@ -13,4 +13,27 @@ library(randomForest)
 library(e1071)
 library(rpart)
 library(nnet)
+```
+
+# Import Data and add Surface Information to Points
+
+Import the specific data that I will be working with.  
+In this case, I want data about serving and point basics on a specific surface (hard, clay or grass).
+```{r}
+matches_men <- read_csv("C:\\Users\\Rino Cattabiani\\Mens Data\\charting-m-matches.csv")
+matches_women <- read_csv("C:\\Users\\Rino Cattabiani\\Womens Data\\charting-w-matches.csv")
+points_men <- read_csv("C:\\Users\\Rino Cattabiani\\Mens Data\\charting-m-points-2020s.csv")
+points_women <- read_csv("C:\\Users\\Rino Cattabiani\\Womens Data\\charting-w-points-2020s.csv")
+
+surface_lookup_men <- matches_men %>%
+    select(match_id, Surface) %>%
+    rename(surface = Surface)
+surface_lookup_women <- matches_women %>%
+    select(match_id, Surface) %>%
+    rename(surface = Surface)
+
+points_men <- points_men %>% left_join(surface_lookup_men, by = "match_id")
+points_women <- points_women %>% left_join(surface_lookup_women, by = "match_id")
+
+cat(sprintf("Loaded %d men's points and %d women's points\n", nrow(points_men), nrow(points_women)))
 ```
