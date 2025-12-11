@@ -215,3 +215,86 @@ extract_features_enhanced <- function(points_data, player_name, min_matches = 60
     return(features)
 }
 ```
+
+# Split data into train/test and evaluate models for serve direction prediction
+
+Split Data into train/test and evaluate ML models
+```{r}
+train_and_evaluate <- function(player_data, player_name, court_side = "deuce") {
+    side_code <- ifelse(court_side == "deuce", "D", "A")
+    data <- player_data %>% filter(serve_side == side_code)
+
+    if (nrow(data) < 50) {
+        cat(sprintf("Not enough data for %s on %s side\n", player_name, court_side))
+        return(NULL)
+    }
+
+    model_data <- data %>%
+        select(
+            serve_dir, wide_count, body_count, t_count, wide_won, body_won, t_won,
+            wide_pct, body_pct, t_pct, server_run_index, anxiety, prev_point_won,
+            serve_number_in_match, match_stage, points_in_current_game,
+            is_break_point, is_game_point, is_deuce, is_tiebreak,
+            consecutive_wins, consecutive_losses, consecutive_same_direction,
+            serve_entropy, momentum_score, point_diff_in_game
+        ) %>%
+        drop_na()
+
+    model_data$serve_dir <- factor(model_data$serve_dir)
+    model_data$is_break_point <- as.numeric(model_data$is_break_point)
+    model_data$is_game_point <- as.numeric(model_data$is_game_point)
+    model_data$is_deuce <- as.numeric(model_data$is_deuce)
+    model_data$is_tiebreak <- as.numeric(model_data$is_tiebreak)
+
+    set.seed(123)
+    train_idx <- createDataPartition(model_data$serve_dir, p = 0.7, list = FALSE)
+    train_data <- model_data[train_idx, ]
+    test_data <- model_data[-train_idx, ]
+
+    results <- list()
+
+    tryCatch(
+        {
+            lr_model <- multinom(serve_dir ~ ., data = train_data, trace = FALSE, maxit = 500)
+            results$LR <- mean(predict(lr_model, test_data) == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$LR <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            rf_model <- randomForest(serve_dir ~ ., data = train_data, ntree = 200)
+            results$RF <- mean(predict(rf_model, test_data) == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$RF <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            dt_model <- rpart(serve_dir ~ ., data = train_data)
+            results$DT <- mean(predict(dt_model, test_data, type = "class") == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$DT <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            nn_model <- nnet(serve_dir ~ ., data = train_data, size = 10, maxit = 200, trace = FALSE)
+            results$NN <- mean(predict(nn_model, test_data, type = "class") == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$NN <<- NA
+        }
+    )
+
+    results$MEAN <- mean(unlist(results), na.rm = TRUE)
+
+    return(list(player = player_name, side = court_side, accuracies = results, n_points = nrow(model_data)))
+}
+```
