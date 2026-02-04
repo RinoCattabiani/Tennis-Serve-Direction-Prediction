@@ -1,0 +1,617 @@
+---
+title: "ATP Tennis Serve Direction Prediction"
+subtitle: "Machine Learning Analysis Using Match Charting Project Data"
+author: "Rino Cattabiani"
+date: "February 2026"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: flatly
+    highlight-style: tango
+    code-fold: show
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    highlight-style: tango
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+{{< pagebreak >}}
+
+# Executive Summary
+
+This project develops machine learning models to predict serve direction in professional tennis using data from the Match Charting Project. The analysis encompasses both ATP (men's) and WTA (women's) tours, examining serve patterns across different court sides (deuce and advantage) and employing multiple classification algorithms including Logistic Regression, Random Forest, Decision Trees, and Neural Networks.
+
+**Key Objectives:**
+
+- Parse and process point-by-point tennis data from the Match Charting Project
+- Engineer features capturing temporal, psychological, and game-state information
+- Train and evaluate multiple machine learning models for serve direction prediction
+- Compare predictive accuracy across players, genders, and court positions
+
+**Technical Approach:**
+
+The analysis extracts 25+ engineered features from raw point data, including within-match serve direction history, win percentages by direction, momentum indicators, and situational variables (break points, game points, tiebreaks). Models are trained on a 70/30 train-test split and evaluated using classification accuracy.
+
+{{< pagebreak >}}
+
+# Introduction
+
+## Background
+
+Serve direction prediction is a challenging problem in tennis analytics due to the inherently strategic nature of serving. Players must balance predictability (which opponents can exploit) against playing to their strengths (which often creates detectable patterns). This tension creates an opportunity for machine learning approaches to identify subtle patterns in serve selection behavior.
+
+## Data Source
+
+The Match Charting Project provides detailed point-by-point data for professional tennis matches, including:
+
+- Serve direction coding (Wide, Body, T-direction)
+- Point scores and game states
+- Match outcomes and surface information
+- Player identities and tournament details
+
+The serve direction is encoded in the first character of the serve code:
+
+- **4** = Wide (W) - serve directed toward the sideline
+- **5** = Body (B) - serve directed at the returner's body
+- **6** = T (T) - serve directed down the center service line
+
+## Methodology Overview
+
+The analysis follows a structured pipeline:
+
+1. **Data Integration**: Merge point data with match metadata to obtain surface information
+2. **Feature Engineering**: Extract temporal, psychological, and game-state features
+3. **Model Training**: Apply multiple ML algorithms with cross-validation
+4. **Evaluation**: Compare accuracy across models, players, and conditions
+
+{{< pagebreak >}}
+
+# Implementation
+
+## Environment Setup
+
+The analysis leverages several R packages for data manipulation, machine learning, and statistical modeling.
+
+```{r}
+#| label: libraries
+
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(e1071)
+library(rpart)
+library(nnet)
+```
+
+**Package Purposes:**
+
+| Package | Purpose |
+|---------|---------|
+| `tidyverse` | Data wrangling and visualization (dplyr, ggplot2, tidyr, readr) |
+| `caret` | Unified interface for model training and data partitioning |
+| `randomForest` | Random Forest classifier implementation |
+| `e1071` | Support Vector Machine functionality |
+| `rpart` | Decision tree (CART) algorithm |
+| `nnet` | Neural network with single hidden layer (multinomial logistic regression) |
+
+{{< pagebreak >}}
+
+## Data Import and Surface Integration
+
+The Match Charting Project separates match-level and point-level data. We must join these datasets to associate surface information (hard court, clay, grass) with individual points.
+
+```{r}
+#| label: data-import
+#| eval: false
+
+# Import match-level data containing surface information
+matches_men <- read_csv("C:\\Users\\Rino Cattabiani\\Mens Data\\charting-m-matches.csv")
+matches_women <- read_csv("C:\\Users\\Rino Cattabiani\\Womens Data\\charting-w-matches.csv")
+
+# Import point-level data from the 2020s
+points_men <- read_csv("C:\\Users\\Rino Cattabiani\\Mens Data\\charting-m-points-2020s.csv")
+points_women <- read_csv("C:\\Users\\Rino Cattabiani\\Womens Data\\charting-w-points-2020s.csv")
+
+# Create surface lookup tables
+surface_lookup_men <- matches_men %>%
+    select(match_id, Surface) %>%
+    rename(surface = Surface)
+surface_lookup_women <- matches_women %>%
+    select(match_id, Surface) %>%
+    rename(surface = Surface)
+
+# Join surface information to point data
+points_men <- points_men %>% left_join(surface_lookup_men, by = "match_id")
+points_women <- points_women %>% left_join(surface_lookup_women, by = "match_id")
+
+cat(sprintf("Loaded %d men's points and %d women's points\n", nrow(points_men), nrow(points_women)))
+```
+
+**Data Structure Notes:**
+
+- `match_id` serves as the primary key linking matches to points
+- The 2020s dataset provides the most recent, consistently charted data
+- Surface information enables future stratified analysis by court type
+
+{{< pagebreak >}}
+
+## Serve Direction Parsing
+
+The serve direction is encoded in the first character of the first-serve field. This function extracts and categorizes the direction.
+
+```{r}
+#| label: direction-parser
+
+parse_serve_direction <- function(serve_code) {
+    if (is.na(serve_code) || serve_code == "") {
+        return(NA)
+    }
+    first_char <- substr(serve_code, 1, 1)
+    case_when(
+        first_char == "4" ~ "W",
+        first_char == "5" ~ "B",
+        first_char == "6" ~ "T",
+        TRUE ~ NA_character_
+    )
+}
+```
+
+**Encoding Scheme:**
+
+| Code | Direction | Description |
+|------|-----------|-------------|
+| 4 | Wide (W) | Serve to the sideline, pulling returner off court |
+| 5 | Body (B) | Serve at the returner's body, jamming their swing |
+| 6 | T (T) | Serve down the center, creating acute angles |
+
+The strategic implications differ by court side:
+
+- **Deuce side (right)**: Wide serves go to the right-hander's forehand; T serves target the backhand
+- **Ad side (left)**: Wide serves target the backhand; T serves go to the forehand
+
+{{< pagebreak >}}
+
+## Feature Engineering
+
+This is the core analytical component. The `extract_features_enhanced` function computes 25+ features for each serve, capturing patterns that may predict serve direction choice.
+
+### Feature Categories
+
+**Historical Serve Patterns (within-match):**
+
+- Count of serves to each direction (Wide, Body, T)
+- Win percentage when serving to each direction
+- Serve entropy (measure of pattern randomness over last 10 serves)
+- Consecutive same-direction counter
+
+**Game State Variables:**
+
+- Point score (is it break point, game point, deuce?)
+- Game difference and set difference
+- Tiebreak indicator
+- Points played in current game
+
+**Temporal Features:**
+
+- Serve number within the match
+- Match stage (early/middle/late based on serve count)
+- Previous point outcome
+
+**Psychological/Momentum Features:**
+
+- Consecutive wins or losses
+- Overall momentum score (weighted combination of set, game, and point differentials)
+
+### Implementation
+
+```{r}
+#| label: feature-extraction
+
+extract_features_enhanced <- function(points_data, player_name, min_matches = 60) {
+    points_data <- points_data %>%
+        mutate(
+            serve_dir = sapply(`1st`, parse_serve_direction),
+            player1 = sapply(strsplit(match_id, "-"), function(x) x[length(x) - 1]),
+            player2 = sapply(strsplit(match_id, "-"), function(x) x[length(x)]),
+            serve_side = sapply(Pts, function(score) {
+                if (is.na(score) || score == "") {
+                    return(NA)
+                }
+                if (grepl("AD", score)) {
+                    return("A")
+                }
+                if (score == "0-0") {
+                    return("D")
+                }
+
+                parts <- strsplit(score, "-")[[1]]
+                if (length(parts) != 2) {
+                    return(NA)
+                }
+
+                p1 <- case_when(parts[1] == "0" ~ 0, parts[1] == "15" ~ 1, parts[1] == "30" ~ 2, parts[1] == "40" ~ 3, TRUE ~ NA_real_)
+                p2 <- case_when(parts[2] == "0" ~ 0, parts[2] == "15" ~ 1, parts[2] == "30" ~ 2, parts[2] == "40" ~ 3, TRUE ~ NA_real_)
+
+                if (is.na(p1) || is.na(p2)) {
+                    return(NA)
+                }
+                total_points <- p1 + p2
+                return(ifelse(total_points %% 2 == 0, "D", "A"))
+            })
+        )
+
+    player_serves <- points_data %>%
+        filter(!is.na(`1st`), !grepl("x", `1st`), !is.na(serve_dir), !is.na(serve_side)) %>%
+        mutate(
+            is_target_server = case_when(
+                Svr == 1 ~ grepl(player_name, player1, ignore.case = TRUE),
+                Svr == 2 ~ grepl(player_name, player2, ignore.case = TRUE),
+                TRUE ~ FALSE
+            ),
+            server_won = ifelse(Svr == PtWinner, 1, 0),
+            is_break_point = grepl("30-40|0-40|15-40", Pts) & Svr == 2,
+            is_game_point = grepl("40-0|40-15|40-30", Pts) & Svr == 1,
+            is_deuce = grepl("40-40|AD", Pts),
+            is_tiebreak = (Gm1 == 6 & Gm2 == 6),
+            game_diff = Gm1 - Gm2,
+            set_diff = Set1 - Set2
+        ) %>%
+        filter(is_target_server)
+
+    n_matches <- length(unique(player_serves$match_id))
+    if (n_matches < min_matches) {
+        cat(sprintf("Player %s only has %d matches (need %d)\n", player_name, n_matches, min_matches))
+        return(NULL)
+    }
+
+    cat(sprintf("Player %s: %d matches, %d first serves\n", player_name, n_matches, nrow(player_serves)))
+
+    features <- player_serves %>%
+        arrange(match_id, Pt) %>%
+        mutate(
+            wide_count = 0, body_count = 0, t_count = 0,
+            wide_won = 0, body_won = 0, t_won = 0,
+            wide_pct = 0, body_pct = 0, t_pct = 0,
+            server_run_index = 0, prev_point_won = 0, anxiety = 0,
+            serve_number_in_match = 0, match_stage = 0, points_in_current_game = 0,
+            consecutive_wins = 0, consecutive_losses = 0, consecutive_same_direction = 0,
+            serve_entropy = 0, momentum_score = 0, point_diff_in_game = 0
+        )
+
+    for (i in 1:nrow(features)) {
+        current_match <- features$match_id[i]
+        prev_points <- features %>% filter(match_id == current_match, row_number() < i)
+
+        if (nrow(prev_points) > 0) {
+            # Original features
+            features$wide_count[i] <- sum(prev_points$serve_dir == "W", na.rm = TRUE)
+            features$body_count[i] <- sum(prev_points$serve_dir == "B", na.rm = TRUE)
+            features$t_count[i] <- sum(prev_points$serve_dir == "T", na.rm = TRUE)
+            features$wide_won[i] <- sum(prev_points$serve_dir == "W" & prev_points$server_won == 1, na.rm = TRUE)
+            features$body_won[i] <- sum(prev_points$serve_dir == "B" & prev_points$server_won == 1, na.rm = TRUE)
+            features$t_won[i] <- sum(prev_points$serve_dir == "T" & prev_points$server_won == 1, na.rm = TRUE)
+            features$wide_pct[i] <- ifelse(features$wide_count[i] > 0, features$wide_won[i] / features$wide_count[i], 0)
+            features$body_pct[i] <- ifelse(features$body_count[i] > 0, features$body_won[i] / features$body_count[i], 0)
+            features$t_pct[i] <- ifelse(features$t_count[i] > 0, features$t_won[i] / features$t_count[i], 0)
+            features$prev_point_won[i] <- tail(prev_points$server_won, 1)
+            features$server_run_index[i] <- nrow(prev_points)
+
+            # Temporal features
+            features$serve_number_in_match[i] <- nrow(prev_points) + 1
+            features$match_stage[i] <- case_when(
+                features$serve_number_in_match[i] <= 30 ~ 0,
+                features$serve_number_in_match[i] <= 70 ~ 1,
+                TRUE ~ 2
+            )
+
+            current_score <- features$Pts[i]
+            if (!is.na(current_score) && current_score != "") {
+                parts <- strsplit(current_score, "-")[[1]]
+                if (length(parts) == 2) {
+                    p1_points <- case_when(parts[1] == "0" ~ 0, parts[1] == "15" ~ 1, parts[1] == "30" ~ 2, parts[1] == "40" ~ 3, TRUE ~ 0)
+                    p2_points <- case_when(parts[2] == "0" ~ 0, parts[2] == "15" ~ 1, parts[2] == "30" ~ 2, parts[2] == "40" ~ 3, TRUE ~ 0)
+                    features$points_in_current_game[i] <- p1_points + p2_points
+                    features$point_diff_in_game[i] <- p1_points - p2_points
+                }
+            }
+
+            # Psychological features
+            consecutive_count <- 1
+            last_result <- tail(prev_points$server_won, 1)
+            if (nrow(prev_points) > 1) {
+                for (j in (nrow(prev_points) - 1):1) {
+                    if (prev_points$server_won[j] == last_result) {
+                        consecutive_count <- consecutive_count + 1
+                    } else {
+                        break
+                    }
+                }
+            }
+            features$consecutive_wins[i] <- ifelse(last_result == 1, consecutive_count, 0)
+            features$consecutive_losses[i] <- ifelse(last_result == 0, consecutive_count, 0)
+
+            # Consecutive same direction
+            same_dir_count <- 1
+            last_dir <- tail(prev_points$serve_dir, 1)
+            if (nrow(prev_points) > 1) {
+                for (j in (nrow(prev_points) - 1):1) {
+                    if (!is.na(prev_points$serve_dir[j]) && prev_points$serve_dir[j] == last_dir) {
+                        same_dir_count <- same_dir_count + 1
+                    } else {
+                        break
+                    }
+                }
+            }
+            features$consecutive_same_direction[i] <- same_dir_count
+
+            # Serve entropy
+            if (nrow(prev_points) >= 10) {
+                last_10_serves <- tail(prev_points$serve_dir, 10)
+                last_10_serves <- last_10_serves[!is.na(last_10_serves)]
+                if (length(last_10_serves) > 0 && length(unique(last_10_serves)) > 1) {
+                    serve_props <- table(last_10_serves) / length(last_10_serves)
+                    features$serve_entropy[i] <- -sum(serve_props * log2(serve_props))
+                }
+            }
+
+            features$momentum_score[i] <- (features$set_diff[i] * 10) + (features$game_diff[i] * 3) + features$point_diff_in_game[i]
+        }
+    }
+
+    return(features)
+}
+```
+
+**Key Design Decisions:**
+
+1. **Rolling Window**: Features are computed using only *prior* points within a match to prevent data leakage
+2. **Entropy Calculation**: Shannon entropy over the last 10 serves measures how predictable the player's recent pattern has been
+3. **Match Stage**: Three-level discretization (early/middle/late) captures potential strategy shifts
+4. **Momentum Score**: Weighted combination prioritizes set differential > game differential > point differential
+
+{{< pagebreak >}}
+
+## Model Training and Evaluation
+
+The training pipeline splits data by court side (deuce vs. ad) and trains four classification algorithms: Multinomial Logistic Regression, Random Forest, Decision Tree, and Neural Network.
+
+```{r}
+#| label: model-training
+
+train_and_evaluate <- function(player_data, player_name, court_side = "deuce") {
+    side_code <- ifelse(court_side == "deuce", "D", "A")
+    data <- player_data %>% filter(serve_side == side_code)
+
+    if (nrow(data) < 50) {
+        cat(sprintf("Not enough data for %s on %s side\n", player_name, court_side))
+        return(NULL)
+    }
+
+    model_data <- data %>%
+        select(
+            serve_dir, wide_count, body_count, t_count, wide_won, body_won, t_won,
+            wide_pct, body_pct, t_pct, server_run_index, anxiety, prev_point_won,
+            serve_number_in_match, match_stage, points_in_current_game,
+            is_break_point, is_game_point, is_deuce, is_tiebreak,
+            consecutive_wins, consecutive_losses, consecutive_same_direction,
+            serve_entropy, momentum_score, point_diff_in_game
+        ) %>%
+        drop_na()
+
+    model_data$serve_dir <- factor(model_data$serve_dir)
+    model_data$is_break_point <- as.numeric(model_data$is_break_point)
+    model_data$is_game_point <- as.numeric(model_data$is_game_point)
+    model_data$is_deuce <- as.numeric(model_data$is_deuce)
+    model_data$is_tiebreak <- as.numeric(model_data$is_tiebreak)
+
+    set.seed(123)
+    train_idx <- createDataPartition(model_data$serve_dir, p = 0.7, list = FALSE)
+    train_data <- model_data[train_idx, ]
+    test_data <- model_data[-train_idx, ]
+
+    results <- list()
+
+    tryCatch(
+        {
+            lr_model <- multinom(serve_dir ~ ., data = train_data, trace = FALSE, maxit = 500)
+            results$LR <- mean(predict(lr_model, test_data) == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$LR <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            rf_model <- randomForest(serve_dir ~ ., data = train_data, ntree = 200)
+            results$RF <- mean(predict(rf_model, test_data) == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$RF <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            dt_model <- rpart(serve_dir ~ ., data = train_data)
+            results$DT <- mean(predict(dt_model, test_data, type = "class") == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$DT <<- NA
+        }
+    )
+
+    tryCatch(
+        {
+            nn_model <- nnet(serve_dir ~ ., data = train_data, size = 10, maxit = 200, trace = FALSE)
+            results$NN <- mean(predict(nn_model, test_data, type = "class") == test_data$serve_dir)
+        },
+        error = function(e) {
+            results$NN <<- NA
+        }
+    )
+
+    results$MEAN <- mean(unlist(results), na.rm = TRUE)
+
+    return(list(player = player_name, side = court_side, accuracies = results, n_points = nrow(model_data)))
+}
+```
+
+**Model Selection Rationale:**
+
+| Model | Strengths | Hyperparameters |
+|-------|-----------|-----------------|
+| Logistic Regression | Interpretable coefficients, baseline | max iterations = 500 |
+| Random Forest | Handles interactions, robust | 200 trees |
+| Decision Tree | Identifies key split points | Default pruning |
+| Neural Network | Captures nonlinearities | 10 hidden units |
+
+{{< pagebreak >}}
+
+## Analysis Pipeline
+
+The main analysis function orchestrates the entire workflow: identifying players with sufficient data, extracting features, and training models for each player on both court sides.
+
+```{r}
+#| label: analysis-pipeline
+
+run_analysis <- function(points_data, top_n_players = 10, min_matches = 60) {
+    player_matches <- points_data %>%
+        group_by(match_id) %>%
+        slice(1) %>%
+        ungroup() %>%
+        mutate(
+            player1 = sapply(strsplit(match_id, "-"), function(x) x[length(x) - 1]),
+            player2 = sapply(strsplit(match_id, "-"), function(x) x[length(x)])
+        ) %>%
+        select(player1, player2) %>%
+        pivot_longer(cols = everything(), values_to = "player") %>%
+        group_by(player) %>%
+        summarise(n_matches = n()) %>%
+        filter(n_matches >= min_matches) %>%
+        arrange(desc(n_matches))
+
+    cat(sprintf("Found %d players with %d+ matches\n", nrow(player_matches), min_matches))
+
+    selected_players <- head(player_matches$player, top_n_players)
+    deuce_results <- list()
+    ad_results <- list()
+
+    for (player in selected_players) {
+        cat(sprintf("\n=== Processing %s ===\n", player))
+        player_data <- extract_features_enhanced(points_data, player, min_matches)
+
+        if (!is.null(player_data)) {
+            deuce_res <- train_and_evaluate(player_data, player, "deuce")
+            ad_res <- train_and_evaluate(player_data, player, "ad")
+            if (!is.null(deuce_res)) deuce_results[[player]] <- deuce_res
+            if (!is.null(ad_res)) ad_results[[player]] <- ad_res
+        }
+    }
+
+    create_results_table <- function(results_list) {
+        df <- data.frame()
+        for (result in results_list) {
+            row <- c(result$player, unlist(result$accuracies))
+            df <- rbind(df, row)
+        }
+        colnames(df) <- c("Player", "LR", "RF", "DT", "NN", "MEAN")
+        df[, 2:7] <- lapply(df[, 2:7], function(x) round(as.numeric(x), 2))
+        return(df)
+    }
+
+    deuce_table <- create_results_table(deuce_results)
+    ad_table <- create_results_table(ad_results)
+
+    cat("\n=== DEUCE SIDE RESULTS ===\n")
+    print(deuce_table)
+    cat("\n=== AD SIDE RESULTS ===\n")
+    print(ad_table)
+    cat(sprintf(
+        "\nDeuce mean: %.2f | Ad mean: %.2f\n",
+        mean(as.numeric(deuce_table$MEAN)), mean(as.numeric(ad_table$MEAN))
+    ))
+
+    return(list(
+        deuce_results = deuce_results, ad_results = ad_results,
+        deuce_table = deuce_table, ad_table = ad_table
+    ))
+}
+```
+
+{{< pagebreak >}}
+
+## Execution
+
+```{r}
+#| label: run-analysis
+#| eval: false
+
+cat("\n========== MEN'S ANALYSIS ==========\n")
+men_results <- run_analysis(points_men, top_n_players = 10, min_matches = 60)
+
+cat("\n========== WOMEN'S ANALYSIS ==========\n")
+women_results <- run_analysis(points_women, top_n_players = 10, min_matches = 60)
+
+# Save results
+write.csv(men_results$deuce_table, "men_deuce_results.csv", row.names = FALSE)
+write.csv(men_results$ad_table, "men_ad_results.csv", row.names = FALSE)
+write.csv(women_results$deuce_table, "women_deuce_results.csv", row.names = FALSE)
+write.csv(women_results$ad_table, "women_ad_results.csv", row.names = FALSE)
+
+cat("\n========== COMPLETE! ==========\n")
+```
+
+**Output Files:**
+
+- `men_deuce_results.csv` - ATP deuce side accuracies by player
+- `men_ad_results.csv` - ATP ad side accuracies by player
+- `women_deuce_results.csv` - WTA deuce side accuracies by player
+- `women_ad_results.csv` - WTA ad side accuracies by player
+
+{{< pagebreak >}}
+
+# Discussion
+
+## Expected Results
+
+Given that serve direction choice has an inherent strategic component (players intentionally vary their serves to remain unpredictable), baseline accuracy for a three-class problem would be approximately 33%. Models achieving 40-50% accuracy would indicate meaningful pattern detection, while accuracies below 35% would suggest the player maintains effective randomization.
+
+## Potential Improvements
+
+1. **Surface Stratification**: Train separate models for hard court, clay, and grass surfaces
+2. **Opponent Modeling**: Incorporate opponent-specific features (handedness, return positioning)
+3. **Time Series Methods**: Apply LSTM or sequence models to capture temporal dependencies
+4. **Feature Selection**: Use recursive feature elimination to identify most predictive variables
+5. **Ensemble Methods**: Combine predictions across model types for improved robustness
+
+## Limitations
+
+- Data availability varies significantly by player
+- Feature extraction loop is computationally expensive for large datasets
+- Point-level data may have inconsistencies across different charting volunteers
+- Model does not account for second-serve patterns (only first serves analyzed)
+
+{{< pagebreak >}}
+
+# Conclusion
+
+This analysis provides a comprehensive framework for predicting serve direction in professional tennis. The 25+ engineered features capture multiple dimensions of serve selection behavior, from within-match patterns to psychological momentum indicators. The multi-model approach allows for robust comparison and identification of the most effective algorithm for each player's serving tendencies.
+
+The methodology is extensible to additional analyses, including:
+
+- Individual player profiling for coaching applications
+- Real-time serve prediction during matches
+- Identification of players with most/least predictable patterns
+- Surface-specific strategy analysis
+
+---
+
+*Analysis conducted on Match Charting Project data from the 2020s.*
