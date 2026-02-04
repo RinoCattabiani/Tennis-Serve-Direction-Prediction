@@ -1,0 +1,3 @@
+Built a machine learning classification model to predict tennis serve direction using Match Charting Project data, engineering 25+ features including player statistics, match context, and historical tendencies. Implemented and compared multiple algorithms (XGBoost, Random Forest, Logistic Regression) to identify patterns in professional players’ serving strategies. The project demonstrated practical applications of feature engineering and ensemble methods in sports analytics.
+
+Keywords: classification, feature engineering, predictive modeling, pattern recognition, sports analytics, behavior modeling, R
